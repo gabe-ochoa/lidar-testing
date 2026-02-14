@@ -149,7 +149,7 @@
 <div id="cursor-info"></div>
 <div id="object-list"></div>
 <div id="legend">
-  <div class="legend-item" id="leg-points"><span class="legend-dot" style="background:#333"></span>Raw points</div>
+  <div class="legend-item" id="leg-points"><span class="legend-dot" style="background:#888"></span>Raw points</div>
   <div class="legend-item" id="leg-objects"><span class="legend-dot" style="background:#0ff"></span>Tracked object</div>
   <div class="legend-item" id="leg-trails"><span style="color:#666">---</span> Trajectory trail</div>
   <div class="legend-item" id="leg-grid"><span style="color:#666">&#x25CB;</span> Range grid</div>
@@ -321,7 +321,7 @@ function draw() {
   // Raw scan points
   if (show.points) {
     const half = pointSize / 2;
-    ctx.fillStyle = '#333';
+    ctx.fillStyle = '#888';
     for (const p of data.points) {
       const rad = (p.a - 90) * Math.PI / 180;
       const x = cx + p.d * scale * Math.cos(rad);
