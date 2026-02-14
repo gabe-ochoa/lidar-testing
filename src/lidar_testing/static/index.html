@@ -77,12 +77,41 @@
     color: #666;
   }
   .legend-item { margin-bottom: 2px; }
+  .legend-item.disabled { opacity: 0.3; }
   .legend-dot {
     display: inline-block;
     width: 8px; height: 8px;
     border-radius: 50%;
     margin-right: 4px;
     vertical-align: middle;
+  }
+  .toggle-btn {
+    font-family: monospace;
+    font-size: 12px;
+    padding: 3px 10px;
+    border: 1px solid #555;
+    border-radius: 3px;
+    background: #333;
+    color: #ccc;
+    cursor: pointer;
+  }
+  .toggle-btn.active {
+    background: #484;
+    border-color: #6a6;
+    color: #fff;
+  }
+  .toggle-btn:hover { border-color: #888; }
+  .toggle-btn .kbd {
+    font-size: 10px;
+    color: #888;
+    margin-left: 4px;
+  }
+  .toggle-btn.active .kbd { color: #aaa; }
+  #pause-indicator {
+    font-size: 13px;
+    color: #f80;
+    font-weight: bold;
+    display: none;
   }
 </style>
 </head>
@@ -98,8 +127,21 @@
       <input type="range" id="range-slider" min="1" max="20" value="6">
     </label>
   </div>
+  <div>
+    <label>Pt size: <span id="ptsize-val">2</span>px
+      <input type="range" id="ptsize-slider" min="1" max="5" value="2">
+    </label>
+  </div>
+  <div>
+    <button class="toggle-btn active" id="tog-points">Raw Points<span class="kbd">1</span></button>
+    <button class="toggle-btn active" id="tog-objects">Objects<span class="kbd">2</span></button>
+    <button class="toggle-btn active" id="tog-trails">Trails<span class="kbd">3</span></button>
+    <button class="toggle-btn active" id="tog-grid">Grid<span class="kbd">4</span></button>
+    <button class="toggle-btn" id="tog-pause">Pause<span class="kbd">&#9251;</span></button>
+  </div>
   <div id="stats">-- pts | -- obj | -- Hz</div>
   <div id="bg-status" class="learning">Learning background...</div>
+  <span id="pause-indicator">PAUSED</span>
 </div>
 
 <canvas id="lidar"></canvas>
@@ -107,9 +149,10 @@
 <div id="cursor-info"></div>
 <div id="object-list"></div>
 <div id="legend">
-  <div class="legend-item"><span class="legend-dot" style="background:#333"></span>Raw points</div>
-  <div class="legend-item"><span class="legend-dot" style="background:#0ff"></span>Tracked object</div>
-  <div class="legend-item"><span style="color:#666">---</span> Trajectory trail</div>
+  <div class="legend-item" id="leg-points"><span class="legend-dot" style="background:#333"></span>Raw points</div>
+  <div class="legend-item" id="leg-objects"><span class="legend-dot" style="background:#0ff"></span>Tracked object</div>
+  <div class="legend-item" id="leg-trails"><span style="color:#666">---</span> Trajectory trail</div>
+  <div class="legend-item" id="leg-grid"><span style="color:#666">&#x25CB;</span> Range grid</div>
 </div>
 
 <script>
@@ -123,12 +166,20 @@ const rangeSlider = document.getElementById('range-slider');
 const rangeVal = document.getElementById('range-val');
 const cursorInfo = document.getElementById('cursor-info');
 const objectList = document.getElementById('object-list');
+const ptsizeSlider = document.getElementById('ptsize-slider');
+const ptsizeVal = document.getElementById('ptsize-val');
+const pauseIndicator = document.getElementById('pause-indicator');
 
 let maxDistance = 6000;
+let pointSize = 2;
 let data = { points: [], objects: [], trajectories: {}, bg_ready: false, frame: 0 };
 let scanCount = 0;
 let lastSecond = performance.now();
 let fps = 0;
+
+// View toggles
+const show = { points: true, objects: true, trails: true, grid: true };
+let paused = false;
 
 // Stable colors for object IDs
 const COLORS = [
@@ -142,6 +193,54 @@ function colorForId(id) {
 rangeSlider.addEventListener('input', () => {
   maxDistance = parseInt(rangeSlider.value) * 1000;
   rangeVal.textContent = rangeSlider.value;
+});
+
+ptsizeSlider.addEventListener('input', () => {
+  pointSize = parseInt(ptsizeSlider.value);
+  ptsizeVal.textContent = ptsizeSlider.value;
+});
+
+// Toggle button wiring
+function wireToggle(btnId, key) {
+  const btn = document.getElementById(btnId);
+  btn.addEventListener('click', () => {
+    show[key] = !show[key];
+    btn.classList.toggle('active', show[key]);
+    updateLegend();
+  });
+}
+wireToggle('tog-points', 'points');
+wireToggle('tog-objects', 'objects');
+wireToggle('tog-trails', 'trails');
+wireToggle('tog-grid', 'grid');
+
+function togglePause() {
+  paused = !paused;
+  document.getElementById('tog-pause').classList.toggle('active', paused);
+  pauseIndicator.style.display = paused ? 'inline' : 'none';
+}
+document.getElementById('tog-pause').addEventListener('click', togglePause);
+
+function updateLegend() {
+  document.getElementById('leg-points').classList.toggle('disabled', !show.points);
+  document.getElementById('leg-objects').classList.toggle('disabled', !show.objects);
+  document.getElementById('leg-trails').classList.toggle('disabled', !show.trails);
+  document.getElementById('leg-grid').classList.toggle('disabled', !show.grid);
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown', (e) => {
+  if (e.target.tagName === 'INPUT') return;
+  switch (e.key) {
+    case '1': document.getElementById('tog-points').click(); break;
+    case '2': document.getElementById('tog-objects').click(); break;
+    case '3': document.getElementById('tog-trails').click(); break;
+    case '4': document.getElementById('tog-grid').click(); break;
+    case ' ':
+      e.preventDefault();
+      togglePause();
+      break;
+  }
 });
 
 function resize() {
@@ -171,6 +270,11 @@ function toCanvas(x, y, cx, cy, scale) {
 }
 
 function draw() {
+  if (paused) {
+    requestAnimationFrame(draw);
+    return;
+  }
+
   const w = canvas.width;
   const h = canvas.height;
   const cx = w / 2;
@@ -180,31 +284,33 @@ function draw() {
   ctx.fillStyle = '#000';
   ctx.fillRect(0, 0, w, h);
 
-  // Range rings every 1m
-  ctx.strokeStyle = '#1a1a1a';
-  ctx.lineWidth = 1;
-  for (let r = 1000; r <= maxDistance; r += 1000) {
+  if (show.grid) {
+    // Range rings every 1m
+    ctx.strokeStyle = '#1a1a1a';
+    ctx.lineWidth = 1;
+    for (let r = 1000; r <= maxDistance; r += 1000) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Ring labels
+    ctx.fillStyle = '#333';
+    ctx.font = '11px monospace';
+    ctx.textAlign = 'left';
+    for (let r = 1000; r <= maxDistance; r += 1000) {
+      ctx.fillText(`${r / 1000}m`, cx + 4, cy - r * scale + 12);
+    }
+
+    // Axis lines
+    ctx.strokeStyle = '#1a1a1a';
     ctx.beginPath();
-    ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
+    ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+    ctx.moveTo(0, cy); ctx.lineTo(w, cy);
     ctx.stroke();
   }
 
-  // Ring labels
-  ctx.fillStyle = '#333';
-  ctx.font = '11px monospace';
-  ctx.textAlign = 'left';
-  for (let r = 1000; r <= maxDistance; r += 1000) {
-    ctx.fillText(`${r / 1000}m`, cx + 4, cy - r * scale + 12);
-  }
-
-  // Axis lines
-  ctx.strokeStyle = '#1a1a1a';
-  ctx.beginPath();
-  ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
-  ctx.moveTo(0, cy); ctx.lineTo(w, cy);
-  ctx.stroke();
-
-  // Center crosshair
+  // Center crosshair (always visible)
   ctx.strokeStyle = '#444';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -212,84 +318,91 @@ function draw() {
   ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8);
   ctx.stroke();
 
-  // Raw scan points (dim)
-  ctx.fillStyle = '#333';
-  for (const p of data.points) {
-    const rad = (p.a - 90) * Math.PI / 180;
-    const x = cx + p.d * scale * Math.cos(rad);
-    const y = cy + p.d * scale * Math.sin(rad);
-    ctx.fillRect(x - 1, y - 1, 2, 2);
+  // Raw scan points
+  if (show.points) {
+    const half = pointSize / 2;
+    ctx.fillStyle = '#333';
+    for (const p of data.points) {
+      const rad = (p.a - 90) * Math.PI / 180;
+      const x = cx + p.d * scale * Math.cos(rad);
+      const y = cy + p.d * scale * Math.sin(rad);
+      ctx.fillRect(x - half, y - half, pointSize, pointSize);
+    }
   }
 
   // Trajectories
-  for (const [idStr, trail] of Object.entries(data.trajectories)) {
-    const id = parseInt(idStr);
-    const color = colorForId(id);
-    if (trail.length < 2) continue;
+  if (show.trails) {
+    for (const [idStr, trail] of Object.entries(data.trajectories)) {
+      const id = parseInt(idStr);
+      const color = colorForId(id);
+      if (trail.length < 2) continue;
 
-    ctx.strokeStyle = color;
-    ctx.globalAlpha = 0.3;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    const [sx, sy] = toCanvas(trail[0].x, trail[0].y, cx, cy, scale);
-    ctx.moveTo(sx, sy);
-    for (let i = 1; i < trail.length; i++) {
-      const [tx, ty] = toCanvas(trail[i].x, trail[i].y, cx, cy, scale);
-      ctx.lineTo(tx, ty);
+      ctx.strokeStyle = color;
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      const [sx, sy] = toCanvas(trail[0].x, trail[0].y, cx, cy, scale);
+      ctx.moveTo(sx, sy);
+      for (let i = 1; i < trail.length; i++) {
+        const [tx, ty] = toCanvas(trail[i].x, trail[i].y, cx, cy, scale);
+        ctx.lineTo(tx, ty);
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1.0;
     }
-    ctx.stroke();
-    ctx.globalAlpha = 1.0;
   }
 
   // Tracked objects
-  for (const obj of data.objects) {
-    const color = colorForId(obj.id);
-    const [ox, oy] = toCanvas(obj.x, obj.y, cx, cy, scale);
+  if (show.objects) {
+    for (const obj of data.objects) {
+      const color = colorForId(obj.id);
+      const [ox, oy] = toCanvas(obj.x, obj.y, cx, cy, scale);
 
-    // Bounding circle
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(ox, oy, obj.radius * scale, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Center dot
-    ctx.fillStyle = color;
-    ctx.beginPath();
-    ctx.arc(ox, oy, 4, 0, Math.PI * 2);
-    ctx.fill();
-
-    // ID label
-    ctx.fillStyle = color;
-    ctx.font = 'bold 13px monospace';
-    ctx.textAlign = 'center';
-    ctx.fillText(`#${obj.id}`, ox, oy - obj.radius * scale - 8);
-
-    // Velocity arrow
-    const speed = Math.sqrt(obj.vx * obj.vx + obj.vy * obj.vy);
-    if (speed > 20) {
-      const arrowScale = 3;
-      const [ex, ey] = toCanvas(
-        obj.x + obj.vx * arrowScale,
-        obj.y + obj.vy * arrowScale,
-        cx, cy, scale
-      );
+      // Bounding circle
       ctx.strokeStyle = color;
-      ctx.lineWidth = 2;
-      ctx.globalAlpha = 0.6;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
-      ctx.moveTo(ox, oy);
-      ctx.lineTo(ex, ey);
+      ctx.arc(ox, oy, obj.radius * scale, 0, Math.PI * 2);
       ctx.stroke();
-      // Arrowhead
-      const angle = Math.atan2(ey - oy, ex - ox);
+
+      // Center dot
+      ctx.fillStyle = color;
       ctx.beginPath();
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - 8 * Math.cos(angle - 0.4), ey - 8 * Math.sin(angle - 0.4));
-      ctx.moveTo(ex, ey);
-      ctx.lineTo(ex - 8 * Math.cos(angle + 0.4), ey - 8 * Math.sin(angle + 0.4));
-      ctx.stroke();
-      ctx.globalAlpha = 1.0;
+      ctx.arc(ox, oy, 4, 0, Math.PI * 2);
+      ctx.fill();
+
+      // ID label
+      ctx.fillStyle = color;
+      ctx.font = 'bold 13px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText(`#${obj.id}`, ox, oy - obj.radius * scale - 8);
+
+      // Velocity arrow
+      const speed = Math.sqrt(obj.vx * obj.vx + obj.vy * obj.vy);
+      if (speed > 20) {
+        const arrowScale = 3;
+        const [ex, ey] = toCanvas(
+          obj.x + obj.vx * arrowScale,
+          obj.y + obj.vy * arrowScale,
+          cx, cy, scale
+        );
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.6;
+        ctx.beginPath();
+        ctx.moveTo(ox, oy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        // Arrowhead
+        const angle = Math.atan2(ey - oy, ex - ox);
+        ctx.beginPath();
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - 8 * Math.cos(angle - 0.4), ey - 8 * Math.sin(angle - 0.4));
+        ctx.moveTo(ex, ey);
+        ctx.lineTo(ex - 8 * Math.cos(angle + 0.4), ey - 8 * Math.sin(angle + 0.4));
+        ctx.stroke();
+        ctx.globalAlpha = 1.0;
+      }
     }
   }
 
@@ -331,6 +444,8 @@ function connect() {
   };
 
   ws.onmessage = (event) => {
+    if (paused) return;
+
     data = JSON.parse(event.data);
     scanCount++;
     const now = performance.now();
