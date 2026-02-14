@@ -1,0 +1,22 @@
+[project]
+name = "lidar-testing"
+version = "0.1.0"
+description = "Evaluate and compare lidar hardware with real-time web visualization"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "rplidar-roboticia>=0.9.5",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "lidar-tracker",
+]
+
+[project.scripts]
+lidar-server = "lidar_testing.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.sources]
+lidar-tracker = { path = "../lidar-tracker", editable = true }

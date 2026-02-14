@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Lidar Viewer</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #111;
+    color: #ccc;
+    font-family: monospace;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100vh;
+    overflow: hidden;
+  }
+  #controls {
+    display: flex;
+    gap: 24px;
+    align-items: center;
+    padding: 12px;
+    width: 100%;
+    max-width: 1100px;
+    flex-wrap: wrap;
+  }
+  #controls label { font-size: 13px; }
+  #controls input[type=range] { width: 140px; vertical-align: middle; }
+  #status {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 6px;
+  }
+  #status.connected { background: #0f0; }
+  #status.disconnected { background: #f00; }
+  #stats { font-size: 13px; }
+  #bg-status {
+    font-size: 13px;
+    padding: 2px 8px;
+    border-radius: 3px;
+  }
+  #bg-status.learning { background: #553; color: #ff0; }
+  #bg-status.ready { background: #243; color: #0f0; }
+  canvas { background: #000; display: block; }
+  #cursor-info {
+    position: fixed;
+    bottom: 12px;
+    left: 12px;
+    font-size: 13px;
+    color: #888;
+  }
+  #object-list {
+    position: fixed;
+    top: 60px;
+    right: 12px;
+    font-size: 13px;
+    color: #ccc;
+    max-height: calc(100vh - 80px);
+    overflow-y: auto;
+  }
+  .obj-entry {
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    border-radius: 3px;
+    background: #1a1a1a;
+    border-left: 3px solid;
+  }
+  .obj-entry .obj-id { font-weight: bold; }
+  .obj-entry .obj-detail { color: #888; font-size: 11px; }
+  #legend {
+    position: fixed;
+    bottom: 12px;
+    right: 12px;
+    font-size: 11px;
+    color: #666;
+  }
+  .legend-item { margin-bottom: 2px; }
+  .legend-dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    margin-right: 4px;
+    vertical-align: middle;
+  }
+</style>
+</head>
+<body>
+
+<div id="controls">
+  <div>
+    <span id="status" class="disconnected"></span>
+    <span id="conn-label">Disconnected</span>
+  </div>
+  <div>
+    <label>Range: <span id="range-val">6</span>m
+      <input type="range" id="range-slider" min="1" max="20" value="6">
+    </label>
+  </div>
+  <div id="stats">-- pts | -- obj | -- Hz</div>
+  <div id="bg-status" class="learning">Learning background...</div>
+</div>
+
+<canvas id="lidar"></canvas>
+
+<div id="cursor-info"></div>
+<div id="object-list"></div>
+<div id="legend">
+  <div class="legend-item"><span class="legend-dot" style="background:#333"></span>Raw points</div>
+  <div class="legend-item"><span class="legend-dot" style="background:#0ff"></span>Tracked object</div>
+  <div class="legend-item"><span style="color:#666">---</span> Trajectory trail</div>
+</div>
+
+<script>
+const canvas = document.getElementById('lidar');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+const connLabel = document.getElementById('conn-label');
+const statsEl = document.getElementById('stats');
+const bgStatus = document.getElementById('bg-status');
+const rangeSlider = document.getElementById('range-slider');
+const rangeVal = document.getElementById('range-val');
+const cursorInfo = document.getElementById('cursor-info');
+const objectList = document.getElementById('object-list');
+
+let maxDistance = 6000;
+let data = { points: [], objects: [], trajectories: {}, bg_ready: false, frame: 0 };
+let scanCount = 0;
+let lastSecond = performance.now();
+let fps = 0;
+
+// Stable colors for object IDs
+const COLORS = [
+  '#0ff', '#f0f', '#ff0', '#f80', '#0f8', '#80f',
+  '#f44', '#4f4', '#44f', '#fa0', '#0af', '#a0f',
+];
+function colorForId(id) {
+  return COLORS[(id - 1) % COLORS.length];
+}
+
+rangeSlider.addEventListener('input', () => {
+  maxDistance = parseInt(rangeSlider.value) * 1000;
+  rangeVal.textContent = rangeSlider.value;
+});
+
+function resize() {
+  const size = Math.min(window.innerWidth - 200, window.innerHeight - 60);
+  canvas.width = size;
+  canvas.height = size;
+}
+window.addEventListener('resize', resize);
+resize();
+
+// Mouse hover — show angle/distance
+canvas.addEventListener('mousemove', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const mx = e.clientX - rect.left - canvas.width / 2;
+  const my = e.clientY - rect.top - canvas.height / 2;
+  const scale = (canvas.width / 2) / maxDistance;
+  const dist = Math.sqrt(mx * mx + my * my) / scale;
+  let angle = Math.atan2(mx, -my) * 180 / Math.PI;
+  if (angle < 0) angle += 360;
+  cursorInfo.textContent = `${angle.toFixed(1)}\u00b0  ${(dist / 1000).toFixed(2)}m`;
+});
+canvas.addEventListener('mouseleave', () => { cursorInfo.textContent = ''; });
+
+// Cartesian to canvas coords (lidar x=right, y=up → canvas x=right, y=down)
+function toCanvas(x, y, cx, cy, scale) {
+  return [cx + x * scale, cy - y * scale];
+}
+
+function draw() {
+  const w = canvas.width;
+  const h = canvas.height;
+  const cx = w / 2;
+  const cy = h / 2;
+  const scale = cx / maxDistance;
+
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, w, h);
+
+  // Range rings every 1m
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 1;
+  for (let r = 1000; r <= maxDistance; r += 1000) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * scale, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Ring labels
+  ctx.fillStyle = '#333';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'left';
+  for (let r = 1000; r <= maxDistance; r += 1000) {
+    ctx.fillText(`${r / 1000}m`, cx + 4, cy - r * scale + 12);
+  }
+
+  // Axis lines
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.beginPath();
+  ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+  ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+  ctx.stroke();
+
+  // Center crosshair
+  ctx.strokeStyle = '#444';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(cx - 8, cy); ctx.lineTo(cx + 8, cy);
+  ctx.moveTo(cx, cy - 8); ctx.lineTo(cx, cy + 8);
+  ctx.stroke();
+
+  // Raw scan points (dim)
+  ctx.fillStyle = '#333';
+  for (const p of data.points) {
+    const rad = (p.a - 90) * Math.PI / 180;
+    const x = cx + p.d * scale * Math.cos(rad);
+    const y = cy + p.d * scale * Math.sin(rad);
+    ctx.fillRect(x - 1, y - 1, 2, 2);
+  }
+
+  // Trajectories
+  for (const [idStr, trail] of Object.entries(data.trajectories)) {
+    const id = parseInt(idStr);
+    const color = colorForId(id);
+    if (trail.length < 2) continue;
+
+    ctx.strokeStyle = color;
+    ctx.globalAlpha = 0.3;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const [sx, sy] = toCanvas(trail[0].x, trail[0].y, cx, cy, scale);
+    ctx.moveTo(sx, sy);
+    for (let i = 1; i < trail.length; i++) {
+      const [tx, ty] = toCanvas(trail[i].x, trail[i].y, cx, cy, scale);
+      ctx.lineTo(tx, ty);
+    }
+    ctx.stroke();
+    ctx.globalAlpha = 1.0;
+  }
+
+  // Tracked objects
+  for (const obj of data.objects) {
+    const color = colorForId(obj.id);
+    const [ox, oy] = toCanvas(obj.x, obj.y, cx, cy, scale);
+
+    // Bounding circle
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(ox, oy, obj.radius * scale, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Center dot
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(ox, oy, 4, 0, Math.PI * 2);
+    ctx.fill();
+
+    // ID label
+    ctx.fillStyle = color;
+    ctx.font = 'bold 13px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(`#${obj.id}`, ox, oy - obj.radius * scale - 8);
+
+    // Velocity arrow
+    const speed = Math.sqrt(obj.vx * obj.vx + obj.vy * obj.vy);
+    if (speed > 20) {
+      const arrowScale = 3;
+      const [ex, ey] = toCanvas(
+        obj.x + obj.vx * arrowScale,
+        obj.y + obj.vy * arrowScale,
+        cx, cy, scale
+      );
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.globalAlpha = 0.6;
+      ctx.beginPath();
+      ctx.moveTo(ox, oy);
+      ctx.lineTo(ex, ey);
+      ctx.stroke();
+      // Arrowhead
+      const angle = Math.atan2(ey - oy, ex - ox);
+      ctx.beginPath();
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - 8 * Math.cos(angle - 0.4), ey - 8 * Math.sin(angle - 0.4));
+      ctx.moveTo(ex, ey);
+      ctx.lineTo(ex - 8 * Math.cos(angle + 0.4), ey - 8 * Math.sin(angle + 0.4));
+      ctx.stroke();
+      ctx.globalAlpha = 1.0;
+    }
+  }
+
+  requestAnimationFrame(draw);
+}
+requestAnimationFrame(draw);
+
+// Update object list sidebar
+function updateObjectList() {
+  if (data.objects.length === 0) {
+    objectList.innerHTML = data.bg_ready
+      ? '<div style="color:#555">No objects detected</div>'
+      : '';
+    return;
+  }
+  objectList.innerHTML = data.objects.map(obj => {
+    const color = colorForId(obj.id);
+    const dist = Math.sqrt(obj.x * obj.x + obj.y * obj.y);
+    const speed = Math.sqrt(obj.vx * obj.vx + obj.vy * obj.vy);
+    return `<div class="obj-entry" style="border-color:${color}">
+      <span class="obj-id" style="color:${color}">#${obj.id}</span>
+      <div class="obj-detail">
+        dist: ${(dist / 1000).toFixed(2)}m
+        &middot; speed: ${(speed / 1000).toFixed(2)}m/f
+        &middot; age: ${obj.age}
+      </div>
+    </div>`;
+  }).join('');
+}
+
+// WebSocket
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    statusEl.className = 'connected';
+    connLabel.textContent = 'Connected';
+  };
+
+  ws.onmessage = (event) => {
+    data = JSON.parse(event.data);
+    scanCount++;
+    const now = performance.now();
+    if (now - lastSecond >= 1000) {
+      fps = scanCount;
+      scanCount = 0;
+      lastSecond = now;
+    }
+    statsEl.textContent = `${data.points.length} pts | ${data.objects.length} obj | ${fps} Hz`;
+
+    if (data.bg_ready) {
+      bgStatus.className = 'ready';
+      bgStatus.textContent = 'Tracking active';
+    } else {
+      bgStatus.className = 'learning';
+      bgStatus.textContent = `Learning background... (frame ${data.frame})`;
+    }
+
+    updateObjectList();
+  };
+
+  ws.onclose = () => {
+    statusEl.className = 'disconnected';
+    connLabel.textContent = 'Disconnected';
+    setTimeout(connect, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+connect();
+</script>
+</body>
+</html>
